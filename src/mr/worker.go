@@ -1,10 +1,14 @@
 package mr
 
-import "fmt"
-import "log"
-import "net/rpc"
-import "hash/fnv"
+import (
+	"fmt"
+	"hash/fnv"
+	"log"
+	"net/rpc"
+	"time"
 
+	"github.com/google/uuid"
+)
 
 //
 // Map functions return a slice of KeyValue.
@@ -24,18 +28,53 @@ func ihash(key string) int {
 	return int(h.Sum32() & 0x7fffffff)
 }
 
-
 //
 // main/mrworker.go calls this function.
 //
 func Worker(mapf func(string, string) []KeyValue,
 	reducef func(string, []string) string) {
 
-	// Your worker implementation here.
+	// 定义一个uuid
+	uuid, _ := uuid.NewUUID()
 
-	// uncomment to send the Example RPC to the coordinator.
-	// CallExample()
+	// 先尝试一直map，获取文件名，生成中间文件。
+	retryTimes := 0
+	for retryTimes < 10 {
+		c, err := rpc.DialHTTP("tcp", "127.0.0.1:1234")
+		if err != nil {
+			log.Fatal("rpc err: ", err)
+			time.Sleep(time.Second)
+			retryTimes++
+			continue
+		}
+		retryTimes = 0
+		req := MapRequest{uuid.String()}
+		resp := MapResponse{}
+		err2 := c.Call("Coordinator.GetInputFile", &req, &resp)
+		if err2 != nil {
+			fmt.Printf("err2: %v\n", err2)
+		}
 
+		if resp.State == "done" {
+			break
+		}
+		if resp.Filename == "" {
+			// 为空，但是没done，证明有问题了，等一秒重试
+			time.Sleep(time.Second)
+			continue
+		}
+
+		// 文件名获取没有问题
+		// deal with resp filename
+		// write to disk
+		// then send to MapInputFileResp
+		req2 := MapTaskState{resp.Filename, resp.State}
+		resp2 := MapResponse{}
+		err2 = c.Call("Coordinator.MapInputFileResp", &req2, &resp2)
+
+		fmt.Printf("resp: %v\n", resp)
+
+	}
 }
 
 //
@@ -67,9 +106,9 @@ func CallExample() {
 // returns false if something goes wrong.
 //
 func call(rpcname string, args interface{}, reply interface{}) bool {
-	// c, err := rpc.DialHTTP("tcp", "127.0.0.1"+":1234")
-	sockname := coordinatorSock()
-	c, err := rpc.DialHTTP("unix", sockname)
+	c, err := rpc.DialHTTP("tcp", "127.0.0.1"+":1234")
+	// sockname := coordinatorSock()
+	// c, err := rpc.DialHTTP("unix", sockname)
 	if err != nil {
 		log.Fatal("dialing:", err)
 	}
