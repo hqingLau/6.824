@@ -46,6 +46,6 @@ type MapResponse struct {
 }
 
 type MapTaskState struct {
-	filename string
-	state    string
+	Filename string
+	State    string
 }

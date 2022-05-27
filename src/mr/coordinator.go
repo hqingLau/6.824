@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/http"
 	"net/rpc"
+	"strings"
 	"sync"
 )
 
@@ -13,8 +14,8 @@ var void interface{}
 
 type Coordinator struct {
 	// filename list
-	files []string
-
+	files    []string
+	midFiles []string
 	// 通过rpc发送了，但是还没有收到完成信号的
 	mapSend    map[string]interface{}
 	reduceSend map[string]interface{}
@@ -59,12 +60,16 @@ func (c *Coordinator) GetInputFile(req *MapRequest, resp *MapResponse) error {
 // 元素加回去
 func (c *Coordinator) MapInputFileResp(state *MapTaskState, resp *MapResponse) error {
 	c.mtx.Lock()
-	if state.state == "done" {
+	fmt.Printf("state: %v\n", state)
+	if state.State == "done" {
 		// ok了，删除这个元素
-		delete(c.mapSend, state.filename)
+		names := strings.Split(state.Filename, "+")
+		delete(c.mapSend, names[1])
+		c.midFiles = append(c.midFiles, names[0])
+		fmt.Printf("names[0]: %v\n", names[0])
 	} else {
 		// 处理没成功，重新处理
-		c.files = append(c.files, state.filename)
+		c.files = append(c.files, state.Filename)
 		// 不删除，这样状态一直存在，知道再次被分配了，然后delete
 		// delete(c.mapSend, state.filename)
 	}

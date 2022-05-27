@@ -1,10 +1,13 @@
 package mr
 
 import (
+	"encoding/json"
 	"fmt"
 	"hash/fnv"
+	"io/ioutil"
 	"log"
 	"net/rpc"
+	"os"
 	"time"
 
 	"github.com/google/uuid"
@@ -67,11 +70,43 @@ func Worker(mapf func(string, string) []KeyValue,
 		// 文件名获取没有问题
 		// deal with resp filename
 		// write to disk
-		// then send to MapInputFileResp
-		req2 := MapTaskState{resp.Filename, resp.State}
-		resp2 := MapResponse{}
-		err2 = c.Call("Coordinator.MapInputFileResp", &req2, &resp2)
 
+		req2 := MapTaskState{resp.Filename, "done"}
+		resp2 := MapResponse{}
+
+		f, err := os.Open(resp.Filename)
+		if err != nil {
+			log.Fatal(err)
+			req2.State = "nosuchfile"
+			c.Call("Coordinator.MapInputFileResp", &req2, &resp2)
+			return
+		}
+		defer f.Close()
+		content, err := ioutil.ReadAll(f)
+		if err != nil {
+			log.Fatalf("cannot read %v", resp.Filename)
+			req2.State = "filereaderr"
+			c.Call("Coordinator.MapInputFileResp", &req2, &resp2)
+		}
+
+		kvs := mapf(resp.Filename, string(content))
+		fmt.Printf("uuid: %v\n", uuid)
+		outFilename := fmt.Sprintf("%s%d", "mr-out-", ihash(uuid.String())%10)
+		fmt.Printf("outFilename: %v\n", outFilename)
+		out, _ := os.Create(outFilename)
+		defer out.Close()
+		enc := json.NewEncoder(out)
+		for _, kv := range kvs {
+			enc.Encode(kv)
+		}
+
+		req2.Filename = outFilename + "+" + resp.Filename
+		req2.State = "done"
+		err = c.Call("Coordinator.MapInputFileResp", &req2, &resp2)
+		if err != nil {
+			fmt.Printf("err: %v\n", err)
+		}
+		// then send to MapInputFileResp
 		fmt.Printf("resp: %v\n", resp)
 
 	}

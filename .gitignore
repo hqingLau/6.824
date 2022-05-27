@@ -1,4 +1,6 @@
 pkg/
+src/main/mr-out*
 api.key
 .api.key.trimmed
 *-handin.tar.gz
+.vscode/
