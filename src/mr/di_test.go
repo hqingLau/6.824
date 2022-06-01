@@ -1,5 +1,7 @@
 package mr
 
-func TestWorker() {
+import "testing"
 
+func TestWorker(t *testing.T) {
+	combineReduceFiles()
 }

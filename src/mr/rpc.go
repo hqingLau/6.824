@@ -36,10 +36,11 @@ func coordinatorSock() string {
 	return s
 }
 
+// 不需要参数，要我就随机给一个文件
 type MapRequest struct {
-	Uid string
 }
 
+// 文件名和当前状态，应是有必要的
 type MapResponse struct {
 	Filename string
 	State    string
@@ -47,5 +48,27 @@ type MapResponse struct {
 
 type MapTaskState struct {
 	Filename string
+	WorkerId int
+	TaskId   int
 	State    string
+}
+
+type ReduceRequest struct {
+}
+
+type ReduceResponse struct {
+	ReduceId  int
+	Filenames []string
+	State     string
+}
+
+type ReduceTaskState struct {
+	ReduceId       int
+	TmpOutFilename string
+	State          string
+}
+
+type WorkerInfo struct {
+	NReduce int
+	WorkId  int
 }

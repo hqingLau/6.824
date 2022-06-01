@@ -1,4 +1,5 @@
 pkg/
+src/main/bash-5.0/
 src/main/mr-out*
 api.key
 .api.key.trimmed
