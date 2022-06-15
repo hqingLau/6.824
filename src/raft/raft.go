@@ -235,8 +235,17 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	// 只有leader能调用AppendEntries
 	// 所以收到之后，就是收到了心跳或者log，重置election timeout
 
+	reply.Ok = 0
 	rf.mu.Lock()
-	fmt.Println(rf.me, " ding...")
+	defer rf.mu.Unlock()
+	if rf.currentTerm > args.Term {
+
+		return
+	}
+	if rf.me != args.Leader {
+		fmt.Printf("%v ding... %v:%v\n", args.Leader, rf.me, rf.state)
+	}
+
 	rf.currentTerm = args.Term
 	rf.recvHeartBeat = 1
 	rf.voteFor = -1
@@ -244,9 +253,9 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	if rf.me != args.Leader {
 		rf.state = StateFollower
 	}
+	reply.Ok = 1
 	// fmt.Printf("%v ding............:state: %+v heart:%+v\n", rf.me, rf.state, rf.recvHeartBeat)
 	// fmt.Printf("me: %v, term %v, log: %v\n", rf.me, rf.currentTerm, rf.logs)
-	rf.mu.Unlock()
 }
 
 //
@@ -347,7 +356,7 @@ func (rf *Raft) ticker() {
 			time.Sleep(time.Millisecond * 100)
 			// 群发心跳
 			args := new(AppendEntriesArgs)
-			reply := new(AppendEntriesReply)
+			replies := make([]AppendEntriesReply, len(rf.peers))
 			rf.mu.Lock()
 			rf.state = StateLeader
 			// 称为leader, 通知别人
@@ -358,7 +367,14 @@ func (rf *Raft) ticker() {
 			rf.mu.Unlock()
 			for idx, _ := range rf.peers {
 				i := idx
-				go rf.peers[i].Call("Raft.AppendEntries", args, reply)
+				go func() {
+					replies[i] = AppendEntriesReply{-1}
+					rf.peers[i].Call("Raft.AppendEntries", args, &replies[i])
+					time.Sleep(time.Millisecond * 100)
+					if replies[i].Ok == 0 {
+						rf.state = StateFollower
+					}
+				}()
 			}
 
 		} else if curState == StateFollower {
@@ -386,16 +402,16 @@ func (rf *Raft) ticker() {
 			rf.mu.Lock()
 			if rf.recvHeartBeat == 1 {
 				// 收到心跳了
+				fmt.Println(rf.me, "候选人竞选之前收到心跳")
 				rf.recvHeartBeat = 0
 				rf.state = StateFollower
-				break
+				rf.mu.Unlock()
+				continue
 			}
-			rf.mu.Unlock()
 			args := new(RequestVoteArgs)
 			replies := make([]RequestVoteReply, len(rf.peers))
-			rf.mu.Lock()
-			// 可以投票了
-			rf.voteFor = -1
+			// // 可以投票了
+			// rf.voteFor = -1
 			peerCount := len(rf.peers)
 			rf.currentTerm = rf.currentTerm + 1
 			args.CurrentTerm = rf.currentTerm
@@ -420,12 +436,14 @@ func (rf *Raft) ticker() {
 			fmt.Printf("%d voteCount: %v\n", rf.me, voteCount)
 			if int(atomic.LoadInt32(&voteCount)) > peerCount/2 {
 				rf.mu.Lock()
+				fmt.Println("leader: ", rf.me)
 				rf.state = StateLeader
 				rf.mu.Unlock()
 			} else {
-				fmt.Println("本轮选举失败")
+				fmt.Println(rf.me, " 本轮选举失败")
+				// 自己失败了，别的仍可能成功，所以要等待超时
 				// 没有选举成功，成为follower，继续等待超时
-				// atomic.StoreInt32(&rf.state, StateFollower)
+				atomic.StoreInt32(&rf.state, StateFollower)
 			}
 		}
 
