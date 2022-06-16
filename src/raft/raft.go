@@ -193,7 +193,8 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	rf.mu.Lock()
 	// fmt.Printf("原来%d votefor %d\n", rf.me, rf.voteFor)
 	defer rf.mu.Unlock()
-	if rf.state == StateFollower {
+	if rf.state == StateFollower || args.CurrentTerm <= rf.currentTerm {
+		fmt.Printf("---- false%d:%d rf.voteFor: %v term:%v\n", rf.me, rf.currentTerm, rf.voteFor, args.CurrentTerm)
 		return
 	}
 	lastLogTerm := int64(0)
@@ -234,22 +235,23 @@ type AppendEntriesReply struct {
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	// 只有leader能调用AppendEntries
 	// 所以收到之后，就是收到了心跳或者log，重置election timeout
-
 	reply.Ok = 0
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	if rf.currentTerm > args.Term {
-
 		return
 	}
 	if rf.me != args.Leader {
-		fmt.Printf("%v ding... %v:%v\n", args.Leader, rf.me, rf.state)
+		fmt.Printf("%v:term %v  ding... %v:term %v,state%v\n", args.Leader, args.Term, rf.me, rf.currentTerm, rf.state)
 	}
 
 	rf.currentTerm = args.Term
 	rf.recvHeartBeat = 1
 	rf.voteFor = -1
-	rf.logs = append(rf.logs, args.Entries...)
+	// if args.Info != "ding" {
+	// 	rf.logs = append(rf.logs, args.Entries...)
+	// }
+
 	if rf.me != args.Leader {
 		rf.state = StateFollower
 	}
@@ -358,9 +360,14 @@ func (rf *Raft) ticker() {
 			args := new(AppendEntriesArgs)
 			replies := make([]AppendEntriesReply, len(rf.peers))
 			rf.mu.Lock()
+			if rf.state != StateLeader {
+				rf.mu.Unlock()
+				continue
+			}
 			rf.state = StateLeader
 			// 称为leader, 通知别人
 			args.Term = rf.currentTerm
+			args.Info = "ding"
 			args.Leader = rf.me
 			args.Entries = []LogEntry{}
 			args.Entries = append(args.Entries, LogEntry{"", rf.currentTerm})
@@ -379,7 +386,7 @@ func (rf *Raft) ticker() {
 
 		} else if curState == StateFollower {
 			// 目前应该看不到candidate状态
-			randTime := 300 + rand.Intn(300)
+			randTime := 100 + rand.Intn(100)
 			time.Sleep(time.Millisecond * time.Duration(randTime))
 
 			rf.mu.Lock()
@@ -397,12 +404,12 @@ func (rf *Raft) ticker() {
 			rf.mu.Unlock()
 		} else {
 			// candidate, 请求成为leader
-			randTime := rand.Intn(1000)
+			randTime := rand.Intn(600)
 			time.Sleep(time.Millisecond * time.Duration(randTime))
 			rf.mu.Lock()
 			if rf.recvHeartBeat == 1 {
 				// 收到心跳了
-				fmt.Println(rf.me, "候选人竞选之前收到心跳")
+				fmt.Println(rf.me, "候选人竞选之前收到心跳,变回follower")
 				rf.recvHeartBeat = 0
 				rf.state = StateFollower
 				rf.mu.Unlock()
@@ -413,8 +420,7 @@ func (rf *Raft) ticker() {
 			// // 可以投票了
 			// rf.voteFor = -1
 			peerCount := len(rf.peers)
-			rf.currentTerm = rf.currentTerm + 1
-			args.CurrentTerm = rf.currentTerm
+			args.CurrentTerm = rf.currentTerm + 1
 			args.LastLogTerm = 0
 			if len(rf.logs) > 0 {
 				args.LastLogTerm = rf.logs[len(rf.logs)-1].Term
@@ -423,22 +429,57 @@ func (rf *Raft) ticker() {
 			args.Me = rf.me
 
 			voteCount := int32(0)
-			rf.mu.Unlock()
-			for idx, _ := range rf.peers {
-				i := idx
-				replies[idx] = RequestVoteReply{Ok: 0}
-				go func() {
-					rf.peers[i].Call("Raft.RequestVote", args, &replies[i])
-					atomic.AddInt32(&voteCount, replies[i].Ok)
-				}()
+
+			if rf.voteFor == -1 {
+				rf.voteFor = rf.me
+				voteCount++
+				rf.mu.Unlock()
+				for idx, _ := range rf.peers {
+					i := idx
+					replies[idx] = RequestVoteReply{Ok: 0}
+					go func() {
+						rf.peers[i].Call("Raft.RequestVote", args, &replies[i])
+						atomic.AddInt32(&voteCount, replies[i].Ok)
+					}()
+				}
+				time.Sleep(time.Millisecond * 100)
+			} else {
+				rf.mu.Unlock()
 			}
-			time.Sleep(time.Millisecond * 100)
+
 			fmt.Printf("%d voteCount: %v\n", rf.me, voteCount)
 			if int(atomic.LoadInt32(&voteCount)) > peerCount/2 {
-				rf.mu.Lock()
 				fmt.Println("leader: ", rf.me)
+
+				// 群发心跳
+				args := new(AppendEntriesArgs)
+				replies := make([]AppendEntriesReply, len(rf.peers))
+				rf.mu.Lock()
 				rf.state = StateLeader
+				if rf.state != StateLeader {
+					rf.mu.Unlock()
+					continue
+				}
+				rf.state = StateLeader
+				// 称为leader, 通知别人
+				rf.currentTerm = rf.currentTerm + 1
+				args.Term = rf.currentTerm
+				args.Leader = rf.me
+				args.Entries = []LogEntry{}
+				args.Entries = append(args.Entries, LogEntry{"", rf.currentTerm})
 				rf.mu.Unlock()
+				for idx, _ := range rf.peers {
+					i := idx
+					go func() {
+						replies[i] = AppendEntriesReply{-1}
+						rf.peers[i].Call("Raft.AppendEntries", args, &replies[i])
+						time.Sleep(time.Millisecond * 100)
+						if replies[i].Ok == 0 {
+							rf.state = StateFollower
+						}
+					}()
+				}
+
 			} else {
 				fmt.Println(rf.me, " 本轮选举失败")
 				// 自己失败了，别的仍可能成功，所以要等待超时
