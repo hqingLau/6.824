@@ -83,6 +83,7 @@ type Raft struct {
 	state         int32      // state: follower, :candidate, :Leader
 	logs          []LogEntry //日志
 	voteFor       int32      // 是否已经投票,没投为-1
+	applyCh       chan ApplyMsg
 }
 
 // return currentTerm and whether this server
@@ -99,6 +100,14 @@ func (rf *Raft) GetState() (int, bool) {
 	// Your code here (2A).
 	// fmt.Printf("%v: leader %v\n", rf.me, isleader)
 	return term, isleader
+}
+
+type ApplyMsgList []ApplyMsg
+
+func (rf *Raft) SendApplyCh(entries ApplyMsgList, reply *int) {
+	for _, msg := range entries {
+		rf.applyCh <- msg
+	}
 }
 
 //
@@ -234,32 +243,63 @@ type AppendEntriesReply struct {
 	Ok int32 // 0:fail 1,ok
 }
 
+// args.Term = int64(term)
+// args.LastLogIdx = lastLogIdx
+// if lastLogIdx >= 1 {
+// 	args.LastTerm = int(rf.logs[lastLogIdx-1].Term)
+// }
+// args.Leader = server
+// args.Entries = []LogEntry{}
+// args.Entries = append(args.Entries, rf.logs[lastLogIdx+1])
+
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	// 只有leader能调用AppendEntries
 	// 所以收到之后，就是收到了心跳或者log，重置election timeout
 	atomic.StoreInt32(&reply.Ok, 0)
 	rf.mu.Lock()
+
 	defer rf.mu.Unlock()
+
+	// leader的term比follower还小，leader失效，返回
 	if rf.currentTerm > args.Term {
 		return
-	}
-	if rf.me != args.Leader {
-		// fmt.Printf("%v:term %v  ding... %v:term %v,state%v\n", args.Leader, args.Term, rf.me, rf.currentTerm, rf.state)
 	}
 
 	rf.currentTerm = args.Term
 	rf.recvHeartBeat = 1
 	rf.voteFor = -1
-	// if args.Info != "ding" {
-	// 	rf.logs = append(rf.logs, args.Entries...)
-	// }
 
 	if rf.me != args.Leader {
 		rf.state = StateFollower
 	}
-	atomic.StoreInt32(&reply.Ok, 1)
-	// fmt.Printf("%v ding............:state: %+v heart:%+v\n", rf.me, rf.state, rf.recvHeartBeat)
-	// fmt.Printf("me: %v, term %v, log: %v\n", rf.me, rf.currentTerm, rf.logs)
+
+	if args.Entries[0].Command == nil {
+		atomic.StoreInt32(&reply.Ok, 1)
+		return
+	}
+
+	// command entry
+	if args.LastLogIdx == 0 {
+		// 说明本条log是第一条，必须加上
+		rf.logs = append(rf.logs, args.Entries...)
+		atomic.StoreInt32(&reply.Ok, 1)
+	} else {
+		// args.LastLogIdx > 0
+		// 例如：
+		if len(rf.logs) == args.LastLogIdx {
+			if rf.logs[args.LastLogIdx-1].Term == int64(args.LastTerm) {
+				rf.logs = append(rf.logs, args.Entries...)
+				atomic.StoreInt32(&reply.Ok, 1)
+			}
+		} else if len(rf.logs) > args.LastLogIdx {
+			if rf.logs[args.LastLogIdx-1].Term == int64(args.LastTerm) {
+				rf.logs[args.LastLogIdx].Term = args.Entries[0].Term
+				rf.logs[args.LastLogIdx].Command = args.Entries[0].Command
+				atomic.StoreInt32(&reply.Ok, 1)
+			}
+		}
+	}
+	fmt.Printf("%d: %+v\n", rf.me, rf.logs)
 }
 
 //
@@ -317,7 +357,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	isLeader := true
 
 	rf.mu.Lock()
-	index = len(rf.logs)
+	index = len(rf.logs) + 1
 	term = int(rf.currentTerm)
 	isLeader = (!rf.killed()) && (rf.state == StateLeader)
 	rf.mu.Unlock()
@@ -329,38 +369,77 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	return index, term, isLeader
 }
 
-// 可能要server log对齐，需要term信息
+// 小写应该就行了，只是服务器调用，rpc调用AppendEntries
+// 可能要server log对齐，需要term信息, 如果command为nil表示是leader当选的信号
 func (rf *Raft) sendEntries(command interface{}, term int, server int32) {
-	args := make([]AppendEntriesArgs, len(rf.peers))
-	replies := make([]AppendEntriesReply, len(rf.peers))
-
-	// term和logidx都设成从1开始好了
-	lastLogIdx := 0
-	lastTerm := 0
-	rf.mu.Lock()
-	if len(rf.logs) != 0 {
-		lastLogIdx = len(rf.logs)
-		lastTerm = int(rf.logs[len(rf.logs)-1].Term)
+	// 不能通过此处添加nil指令，nil用作leader选举通知
+	if command == nil {
+		return
 	}
+
+	// 先给本地加上log
+	rf.mu.Lock()
+	rf.logs = append(rf.logs, LogEntry{Command: command, Term: int64(term)})
 	rf.mu.Unlock()
 
+	// term和logidx都设成从1开始好了
+	lastLogIdx := len(rf.logs) - 1 // 例如之前已经有一条消息，这是第二条，last就是1
+	rf.mu.Lock()
+	defer fmt.Printf("%d: %+v\n", rf.me, rf.logs)
+	commitApplyChMap := make(map[int][]ApplyMsg)
+	for i := 0; i < len(rf.peers); i++ {
+		commitApplyChMap[i] = []ApplyMsg{}
+	}
+	commitApplyChMapMutex := sync.Mutex{}
+	commitList := []int{}
 	for idx, _ := range rf.peers {
 		i := idx
-
-		args[i].Term = int64(term)
-		args[i].LastLogIdx = lastLogIdx
-		args[i].LastTerm = lastTerm
-		args[i].Leader = server
-		args[i].Entries = []LogEntry{}
-		args[i].Entries = append(args[i].Entries, LogEntry{command, rf.currentTerm})
+		if i == int(rf.me) {
+			continue
+		}
 
 		go func() {
-			replies[i] = AppendEntriesReply{-1}
-			rf.peers[i].Call("Raft.AppendEntries", args, &replies[i])
-			if atomic.LoadInt32(&replies[i].Ok) == 0 {
-				// 不对应，前一个log idx和term对不上
+			args := AppendEntriesArgs{}
+			reply := AppendEntriesReply{0}
+			// 等于0说明不对应，加不上，尝试加前一个
+			for lastLogIdx < len(rf.logs) {
+				args.Term = int64(term)
+				args.LastLogIdx = lastLogIdx
+				if lastLogIdx >= 1 {
+					args.LastTerm = int(rf.logs[lastLogIdx-1].Term)
+				}
+				args.Leader = server
+				args.Entries = []LogEntry{}
+				args.Entries = append(args.Entries, rf.logs[lastLogIdx])
+
+				rf.peers[i].Call("Raft.AppendEntries", &args, &reply)
+				if reply.Ok == 1 {
+					lastLogIdx++
+					commitApplyChMapMutex.Lock()
+					commitApplyChMap[i] = append(commitApplyChMap[i], ApplyMsg{CommandValid: true, Command: args.Entries[0].Command,
+						CommandIndex: lastLogIdx})
+					commitApplyChMapMutex.Unlock()
+				} else {
+					lastLogIdx--
+				}
 			}
+			fmt.Println(i, " 同步成功")
+			commitApplyChMapMutex.Lock()
+			commitList = append(commitList, i)
+			commitApplyChMapMutex.Unlock()
 		}()
+	}
+	rf.mu.Unlock()
+	time.Sleep(time.Millisecond * 500)
+	commitApplyChMapMutex.Lock()
+	lencmls := len(commitList)
+	commitApplyChMapMutex.Unlock()
+
+	if lencmls > len(rf.peers)/2 {
+		for _, i := range commitList {
+			k := 0
+			rf.peers[i].Call("Raft.SendApplyCh", commitApplyChMap[i], &k)
+		}
 	}
 }
 
@@ -417,7 +496,7 @@ func (rf *Raft) ticker() {
 			args.Term = rf.currentTerm
 			args.Leader = rf.me
 			args.Entries = []LogEntry{}
-			args.Entries = append(args.Entries, LogEntry{"", rf.currentTerm})
+			args.Entries = append(args.Entries, LogEntry{nil, rf.currentTerm})
 			rf.mu.Unlock()
 			for idx, _ := range rf.peers {
 				i := idx
@@ -515,7 +594,7 @@ func (rf *Raft) ticker() {
 				args.Term = rf.currentTerm
 				args.Leader = rf.me
 				args.Entries = []LogEntry{}
-				args.Entries = append(args.Entries, LogEntry{"", rf.currentTerm})
+				args.Entries = append(args.Entries, LogEntry{nil, rf.currentTerm})
 				rf.mu.Unlock()
 				for idx, _ := range rf.peers {
 					i := idx
@@ -567,6 +646,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.logs = []LogEntry{}
 	rf.state = StateFollower
 	rf.recvHeartBeat = 0
+	rf.applyCh = applyCh
 
 	// Your initialization code here (2A, 2B, 2C).
 
