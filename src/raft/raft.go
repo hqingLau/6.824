@@ -215,7 +215,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 }
 
 type LogEntry struct {
-	Command string
+	Command interface{}
 	Term    int64
 }
 
@@ -226,6 +226,8 @@ type AppendEntriesArgs struct {
 	Leader       int32  // leader id
 	Entries      []LogEntry
 	LeaderCommit int64 // leader's commitIndex
+	LastLogIdx   int   // 前一条日志的ID
+	LastTerm     int   // 前一条日志的Term
 }
 
 type AppendEntriesReply struct {
@@ -308,14 +310,58 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 // term. the third return value is true if this server believes it is
 // the leader.
 //
+// 添加log的接口
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	index := -1
 	term := -1
 	isLeader := true
 
+	rf.mu.Lock()
+	index = len(rf.logs)
+	term = int(rf.currentTerm)
+	isLeader = (!rf.killed()) && (rf.state == StateLeader)
+	rf.mu.Unlock()
+	if isLeader {
+		go rf.sendEntries(command, term, rf.me)
+	}
 	// Your code here (2B).
 
 	return index, term, isLeader
+}
+
+// 可能要server log对齐，需要term信息
+func (rf *Raft) sendEntries(command interface{}, term int, server int32) {
+	args := make([]AppendEntriesArgs, len(rf.peers))
+	replies := make([]AppendEntriesReply, len(rf.peers))
+
+	// term和logidx都设成从1开始好了
+	lastLogIdx := 0
+	lastTerm := 0
+	rf.mu.Lock()
+	if len(rf.logs) != 0 {
+		lastLogIdx = len(rf.logs)
+		lastTerm = int(rf.logs[len(rf.logs)-1].Term)
+	}
+	rf.mu.Unlock()
+
+	for idx, _ := range rf.peers {
+		i := idx
+
+		args[i].Term = int64(term)
+		args[i].LastLogIdx = lastLogIdx
+		args[i].LastTerm = lastTerm
+		args[i].Leader = server
+		args[i].Entries = []LogEntry{}
+		args[i].Entries = append(args[i].Entries, LogEntry{command, rf.currentTerm})
+
+		go func() {
+			replies[i] = AppendEntriesReply{-1}
+			rf.peers[i].Call("Raft.AppendEntries", args, &replies[i])
+			if atomic.LoadInt32(&replies[i].Ok) == 0 {
+				// 不对应，前一个log idx和term对不上
+			}
+		}()
+	}
 }
 
 //
@@ -369,7 +415,6 @@ func (rf *Raft) ticker() {
 			rf.state = StateLeader
 			// 称为leader, 通知别人
 			args.Term = rf.currentTerm
-			args.Info = ""
 			args.Leader = rf.me
 			args.Entries = []LogEntry{}
 			args.Entries = append(args.Entries, LogEntry{"", rf.currentTerm})
