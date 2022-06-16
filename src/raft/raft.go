@@ -194,7 +194,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// fmt.Printf("原来%d votefor %d\n", rf.me, rf.voteFor)
 	defer rf.mu.Unlock()
 	if rf.state == StateFollower || args.CurrentTerm <= rf.currentTerm {
-		fmt.Printf("---- false%d:%d rf.voteFor: %v term:%v\n", rf.me, rf.currentTerm, rf.voteFor, args.CurrentTerm)
+		// fmt.Printf("---- false%d:%d rf.voteFor: %v term:%v\n", rf.me, rf.currentTerm, rf.voteFor, args.CurrentTerm)
 		return
 	}
 	lastLogTerm := int64(0)
@@ -209,7 +209,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	}
 
 	if reply.Ok == 1 {
-		fmt.Printf("%d rf.voteFor: %v state:%v log:%v\n", rf.me, rf.voteFor, rf.state, rf.logs)
+		// fmt.Printf("%d rf.voteFor: %v state:%v log:%v\n", rf.me, rf.voteFor, rf.state, rf.logs)
 	}
 
 }
@@ -235,14 +235,14 @@ type AppendEntriesReply struct {
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	// 只有leader能调用AppendEntries
 	// 所以收到之后，就是收到了心跳或者log，重置election timeout
-	reply.Ok = 0
+	atomic.StoreInt32(&reply.Ok, 0)
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	if rf.currentTerm > args.Term {
 		return
 	}
 	if rf.me != args.Leader {
-		fmt.Printf("%v:term %v  ding... %v:term %v,state%v\n", args.Leader, args.Term, rf.me, rf.currentTerm, rf.state)
+		// fmt.Printf("%v:term %v  ding... %v:term %v,state%v\n", args.Leader, args.Term, rf.me, rf.currentTerm, rf.state)
 	}
 
 	rf.currentTerm = args.Term
@@ -255,7 +255,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	if rf.me != args.Leader {
 		rf.state = StateFollower
 	}
-	reply.Ok = 1
+	atomic.StoreInt32(&reply.Ok, 1)
 	// fmt.Printf("%v ding............:state: %+v heart:%+v\n", rf.me, rf.state, rf.recvHeartBeat)
 	// fmt.Printf("me: %v, term %v, log: %v\n", rf.me, rf.currentTerm, rf.logs)
 }
@@ -331,7 +331,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 //
 func (rf *Raft) Kill() {
 	atomic.StoreInt32(&rf.dead, 1)
-	fmt.Printf("kill %v ==================\n", rf.me)
+	// fmt.Printf("kill %v ==================\n", rf.me)
 	// Your code here, if desired.
 }
 
@@ -351,7 +351,9 @@ func (rf *Raft) ticker() {
 
 		// Because the tester limits you to 10 heartbeats per second
 		// 暂时设置过期时间（200,1200）ms
-		curState := atomic.LoadInt32(&rf.state)
+		rf.mu.Lock()
+		curState := rf.state
+		rf.mu.Unlock()
 		// fmt.Printf("%v: state: %v\n", rf.me, rf.state)
 		if curState == StateLeader {
 
@@ -367,7 +369,7 @@ func (rf *Raft) ticker() {
 			rf.state = StateLeader
 			// 称为leader, 通知别人
 			args.Term = rf.currentTerm
-			args.Info = "ding"
+			args.Info = ""
 			args.Leader = rf.me
 			args.Entries = []LogEntry{}
 			args.Entries = append(args.Entries, LogEntry{"", rf.currentTerm})
@@ -378,8 +380,10 @@ func (rf *Raft) ticker() {
 					replies[i] = AppendEntriesReply{-1}
 					rf.peers[i].Call("Raft.AppendEntries", args, &replies[i])
 					time.Sleep(time.Millisecond * 100)
-					if replies[i].Ok == 0 {
+					if atomic.LoadInt32(&replies[i].Ok) == 0 {
+						rf.mu.Lock()
 						rf.state = StateFollower
+						rf.mu.Unlock()
 					}
 				}()
 			}
@@ -393,11 +397,11 @@ func (rf *Raft) ticker() {
 			heartBeat := rf.recvHeartBeat
 			if heartBeat == 1 {
 				// 收到心跳了
-				fmt.Printf("%d recv heartBeat\n", rf.me)
+				// fmt.Printf("%d recv heartBeat\n", rf.me)
 				rf.recvHeartBeat = 0
 			} else {
 				// 有段时间没收到心跳了，成为candidate
-				fmt.Printf("%d 超时称为candidate\n", rf.me)
+				// fmt.Printf("%d 超时称为candidate\n", rf.me)
 				rf.state = StateCandidate
 				rf.voteFor = -1
 			}
@@ -409,7 +413,7 @@ func (rf *Raft) ticker() {
 			rf.mu.Lock()
 			if rf.recvHeartBeat == 1 {
 				// 收到心跳了
-				fmt.Println(rf.me, "候选人竞选之前收到心跳,变回follower")
+				// fmt.Println(rf.me, "候选人竞选之前收到心跳,变回follower")
 				rf.recvHeartBeat = 0
 				rf.state = StateFollower
 				rf.mu.Unlock()
@@ -447,7 +451,7 @@ func (rf *Raft) ticker() {
 				rf.mu.Unlock()
 			}
 
-			fmt.Printf("%d voteCount: %v\n", rf.me, voteCount)
+			// fmt.Printf("%d voteCount: %v\n", rf.me, voteCount)
 			if int(atomic.LoadInt32(&voteCount)) > peerCount/2 {
 				fmt.Println("leader: ", rf.me)
 
@@ -474,17 +478,21 @@ func (rf *Raft) ticker() {
 						replies[i] = AppendEntriesReply{-1}
 						rf.peers[i].Call("Raft.AppendEntries", args, &replies[i])
 						time.Sleep(time.Millisecond * 100)
-						if replies[i].Ok == 0 {
+						if atomic.LoadInt32(&replies[i].Ok) == 0 {
+							rf.mu.Lock()
 							rf.state = StateFollower
+							rf.mu.Unlock()
 						}
 					}()
 				}
 
 			} else {
-				fmt.Println(rf.me, " 本轮选举失败")
+				// fmt.Println(rf.me, " 本轮选举失败")
 				// 自己失败了，别的仍可能成功，所以要等待超时
 				// 没有选举成功，成为follower，继续等待超时
-				atomic.StoreInt32(&rf.state, StateFollower)
+				rf.mu.Lock()
+				rf.state = StateFollower
+				rf.mu.Unlock()
 			}
 		}
 
