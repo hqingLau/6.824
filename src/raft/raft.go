@@ -105,6 +105,15 @@ func (rf *Raft) GetState() (int, bool) {
 type ApplyMsgIdList []int
 
 func (rf *Raft) SendApplyCh(entries ApplyMsgIdList, reply *int) {
+	// 这里顺序乱掉了，还没改，估计要判断一下前者的状态，然后做个等待。
+	// hqinglau@centos:~/6.824/src/raft$ cat a.txt | grep "2: ch msg"
+	// 2: ch msg: {true 10 1 false [] 0 0}
+	// 2: ch msg: {true 30 3 false [] 0 0}
+	// 2: ch msg: {true 1000 2 false [] 0 0}
+	// hqinglau@centos:~/6.824/src/raft$ cat a.txt | grep "3: ch msg"
+	// 3: ch msg: {true 10 1 false [] 0 0}
+	// 3: ch msg: {true 1000 2 false [] 0 0}
+	// 3: ch msg: {true 30 3 false [] 0 0}
 	for _, idx := range entries {
 		rf.mu.Lock()
 		logEntry := rf.logs[idx-1]
@@ -423,10 +432,11 @@ func (rf *Raft) sendEntries(command interface{}, term int, server int32) {
 				return
 			}
 			rf.mu.Unlock()
-			args := AppendEntriesArgs{}
-			reply := AppendEntriesReply{0}
+
 			// 等于0说明不对应，加不上，尝试加前一个
 			for {
+				args := AppendEntriesArgs{}
+				reply := AppendEntriesReply{0}
 				rf.mu.Lock()
 				if lastLogIdx >= len(rf.logs) || lastLogIdx < 0 {
 					rf.mu.Unlock()
@@ -439,7 +449,13 @@ func (rf *Raft) sendEntries(command interface{}, term int, server int32) {
 				}
 				args.Leader = server
 				args.Entries = []LogEntry{}
-				args.Entries = append(args.Entries, rf.logs[lastLogIdx])
+				// args.Entries = append(args.Entries, rf.logs[lastLogIdx])
+				// 这里之前复制的rflogs，但是那个是已提交状态，就会干扰现在的chan发送
+				args.Entries = append(args.Entries, LogEntry{
+					Command:   rf.logs[lastLogIdx].Command,
+					Term:      rf.logs[lastLogIdx].Term,
+					Committed: 0,
+				})
 				rf.mu.Unlock()
 
 				rf.peers[i].Call("Raft.AppendEntries", &args, &reply)
