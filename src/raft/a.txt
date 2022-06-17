@@ -1,0 +1,99 @@
+Running tool: /usr/local/go/bin/go test -timeout 30s -run ^TestFailNoAgree2B$ 6.824/raft
+
+warning: only one CPU, which may conceal locking bugs
+Test (2B): no agreement if too many followers disconnect ...
+leader:  3
+labgob warning: Decoding into a non-default variable/field Ok may not work
+日志：4: [{Command:10 Term:1 Committed:0}]
+4  同步成功
+[3 4]
+日志：0: [{Command:10 Term:1 Committed:0}]
+0  同步成功
+[3 4 0]
+日志：1: [{Command:10 Term:1 Committed:0}]
+1  同步成功
+[3 4 0 1]
+日志：2: [{Command:10 Term:1 Committed:0}]
+2  同步成功
+[3 4 0 1 2]
+command 10提交给：3: [1]
+command 10提交给：4: [1]
+command 10提交给：0: [1]
+command 10提交给：1: [1]
+command 10提交给：2: [1]
+3最后: [{Command:10 Term:1 Committed:0}]
+2: ch msg: {true 10 1 false [] 0 0}
+3: ch msg: {true 10 1 false [] 0 0}
+4: ch msg: {true 10 1 false [] 0 0}
+0: ch msg: {true 10 1 false [] 0 0}
+1: ch msg: {true 10 1 false [] 0 0}
+日志：2: [{Command:10 Term:1 Committed:1} {Command:20 Term:1 Committed:0}]
+2  同步成功
+[3 2]
+command 20 follower不够
+3最后: [{Command:10 Term:1 Committed:1} {Command:20 Term:1 Committed:0}]
+日志：4: [{Command:10 Term:1 Committed:1}]
+日志：4: [{Command:10 Term:1 Committed:1} {Command:20 Term:1 Committed:0}]
+日志：4: [{Command:10 Term:1 Committed:1} {Command:20 Term:1 Committed:0} {Command:1000 Term:1 Committed:0}]
+4  同步成功
+[3 4]
+日志：4: [{Command:10 Term:1 Committed:1} {Command:20 Term:1 Committed:0} {Command:1000 Term:1 Committed:0} {Command:30 Term:1 Committed:0}]
+4  同步成功
+[3 4]
+日志：0: [{Command:10 Term:1 Committed:1}]
+日志：0: [{Command:10 Term:1 Committed:1}]
+日志：0: [{Command:10 Term:1 Committed:1} {Command:20 Term:1 Committed:0}]
+日志：0: [{Command:10 Term:1 Committed:1} {Command:20 Term:1 Committed:0} {Command:1000 Term:1 Committed:0}]
+日志：0: [{Command:10 Term:1 Committed:1} {Command:20 Term:1 Committed:0} {Command:1000 Term:1 Committed:0} {Command:30 Term:1 Committed:0}]
+0  同步成功
+[3 4 0]
+日志：1: [{Command:10 Term:1 Committed:1}]
+日志：1: [{Command:10 Term:1 Committed:1}]
+日志：1: [{Command:10 Term:1 Committed:1} {Command:20 Term:1 Committed:0}]
+日志：1: [{Command:10 Term:1 Committed:1} {Command:20 Term:1 Committed:0} {Command:1000 Term:1 Committed:0}]
+日志：1: [{Command:10 Term:1 Committed:1} {Command:20 Term:1 Committed:0} {Command:1000 Term:1 Committed:0} {Command:30 Term:1 Committed:0}]
+1  同步成功
+[3 4 0 1]
+日志：2: [{Command:10 Term:1 Committed:1} {Command:20 Term:1 Committed:0}]
+日志：2: [{Command:10 Term:1 Committed:1} {Command:20 Term:1 Committed:0} {Command:1000 Term:1 Committed:0}]
+日志：2: [{Command:10 Term:1 Committed:1} {Command:20 Term:1 Committed:0} {Command:1000 Term:1 Committed:0} {Command:30 Term:1 Committed:0}]
+2  同步成功
+[3 4 0 1 2]
+日志：0: [{Command:10 Term:1 Committed:1} {Command:20 Term:1 Committed:0} {Command:1000 Term:1 Committed:0} {Command:30 Term:1 Committed:0}]
+0  同步成功
+[3 4 0]
+日志：1: [{Command:10 Term:1 Committed:1} {Command:20 Term:1 Committed:0} {Command:1000 Term:1 Committed:0} {Command:30 Term:1 Committed:0}]
+1  同步成功
+[3 4 0 1]
+日志：2: [{Command:10 Term:1 Committed:1} {Command:20 Term:1 Committed:0} {Command:1000 Term:1 Committed:0} {Command:30 Term:1 Committed:0}]
+2  同步成功
+[3 4 0 1 2]
+0  同步成功
+[3 2 0]
+command 1000提交给：3: [3]
+command 1000提交给：4: [2 3]
+command 1000提交给：0: [2 3 4]
+command 1000提交给：1: [2 3 4]
+command 1000提交给：2: [3 4]
+3最后: [{Command:10 Term:1 Committed:1} {Command:20 Term:1 Committed:0} {Command:1000 Term:1 Committed:0}]
+2: ch msg: {true 1000 3 false [] 0 0}
+2: ch msg: {true 30 4 false [] 0 0}
+command 30提交给：3: [4]
+command 30提交给：4: [4]
+command 30提交给：0: [4]
+command 30提交给：1: [4]
+command 30提交给：2: [4]
+3最后: [{Command:10 Term:1 Committed:1} {Command:20 Term:1 Committed:0} {Command:1000 Term:1 Committed:0} {Command:30 Term:1 Committed:0}]
+2: ch msg: {true 30 4 false [] 0 0}
+3: ch msg: {true 1000 3 false [] 0 0}
+4: ch msg: {true 20 2 false [] 0 0}
+4: ch msg: {true 1000 3 false [] 0 0}
+0: ch msg: {true 20 2 false [] 0 0}
+0: ch msg: {true 1000 3 false [] 0 0}
+0: ch msg: {true 30 4 false [] 0 0}
+1: ch msg: {true 20 2 false [] 0 0}
+1: ch msg: {true 1000 3 false [] 0 0}
+1: ch msg: {true 30 4 false [] 0 0}
+2022/06/17 16:27:03 apply error: server 2 apply out of order 3
+FAIL	6.824/raft	4.359s
+FAIL

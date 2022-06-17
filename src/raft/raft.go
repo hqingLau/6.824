@@ -102,11 +102,24 @@ func (rf *Raft) GetState() (int, bool) {
 	return term, isleader
 }
 
-type ApplyMsgList []ApplyMsg
+type ApplyMsgIdList []int
 
-func (rf *Raft) SendApplyCh(entries ApplyMsgList, reply *int) {
-	for _, msg := range entries {
+func (rf *Raft) SendApplyCh(entries ApplyMsgIdList, reply *int) {
+	for _, idx := range entries {
+		rf.mu.Lock()
+		logEntry := rf.logs[idx-1]
+		if rf.logs[idx-1].Committed == 1 {
+			rf.mu.Unlock()
+			continue
+		}
+		msg := ApplyMsg{CommandValid: true, Command: logEntry.Command, CommandIndex: idx}
+
+		fmt.Printf("%d: ch msg: %v\n", rf.me, msg)
+		rf.mu.Unlock()
 		rf.applyCh <- msg
+		rf.mu.Lock()
+		rf.logs[idx-1].Committed = 1
+		rf.mu.Unlock()
 	}
 }
 
@@ -224,8 +237,9 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 }
 
 type LogEntry struct {
-	Command interface{}
-	Term    int64
+	Command   interface{}
+	Term      int64
+	Committed int32
 }
 
 // *********************** AppendEntries ***********************
@@ -261,7 +275,9 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	defer rf.mu.Unlock()
 
 	// leader的term比follower还小，leader失效，返回
-	if rf.currentTerm > args.Term {
+	if rf.currentTerm > args.Term || args.LastLogIdx < 0 {
+		// 此次添加不可能成功，退出
+		atomic.StoreInt32(&reply.Ok, -1)
 		return
 	}
 
@@ -299,7 +315,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			}
 		}
 	}
-	fmt.Printf("%d: %+v\n", rf.me, rf.logs)
+	fmt.Printf("日志：%d: %+v\n", rf.me, rf.logs)
 }
 
 //
@@ -383,15 +399,16 @@ func (rf *Raft) sendEntries(command interface{}, term int, server int32) {
 	rf.mu.Unlock()
 
 	// term和logidx都设成从1开始好了
-	lastLogIdx := len(rf.logs) - 1 // 例如之前已经有一条消息，这是第二条，last就是1
+
 	rf.mu.Lock()
-	defer fmt.Printf("%d: %+v\n", rf.me, rf.logs)
-	commitApplyChMap := make(map[int][]ApplyMsg)
+	defer fmt.Printf("%d最后: %+v\n", rf.me, rf.logs)
+	commitApplyChMap := make(map[int]ApplyMsgIdList) // 存储log的id就行，然后发送给follower，让follower自己处理
 	for i := 0; i < len(rf.peers); i++ {
-		commitApplyChMap[i] = []ApplyMsg{}
+		commitApplyChMap[i] = []int{}
 	}
+	commitApplyChMap[int(rf.me)] = append(commitApplyChMap[int(rf.me)], int(len(rf.logs)))
 	commitApplyChMapMutex := sync.Mutex{}
-	commitList := []int{}
+	commitList := []int{int(rf.me)}
 	for idx, _ := range rf.peers {
 		i := idx
 		if i == int(rf.me) {
@@ -399,10 +416,22 @@ func (rf *Raft) sendEntries(command interface{}, term int, server int32) {
 		}
 
 		go func() {
+			rf.mu.Lock()
+			lastLogIdx := len(rf.logs) - 1 // 例如之前已经有一条消息，这是第二条，last就是1
+			if lastLogIdx < 0 {
+				rf.mu.Unlock()
+				return
+			}
+			rf.mu.Unlock()
 			args := AppendEntriesArgs{}
 			reply := AppendEntriesReply{0}
 			// 等于0说明不对应，加不上，尝试加前一个
-			for lastLogIdx < len(rf.logs) {
+			for {
+				rf.mu.Lock()
+				if lastLogIdx >= len(rf.logs) || lastLogIdx < 0 {
+					rf.mu.Unlock()
+					break
+				}
 				args.Term = int64(term)
 				args.LastLogIdx = lastLogIdx
 				if lastLogIdx >= 1 {
@@ -411,21 +440,24 @@ func (rf *Raft) sendEntries(command interface{}, term int, server int32) {
 				args.Leader = server
 				args.Entries = []LogEntry{}
 				args.Entries = append(args.Entries, rf.logs[lastLogIdx])
+				rf.mu.Unlock()
 
 				rf.peers[i].Call("Raft.AppendEntries", &args, &reply)
-				if reply.Ok == 1 {
+				if atomic.LoadInt32(&reply.Ok) == 1 {
 					lastLogIdx++
 					commitApplyChMapMutex.Lock()
-					commitApplyChMap[i] = append(commitApplyChMap[i], ApplyMsg{CommandValid: true, Command: args.Entries[0].Command,
-						CommandIndex: lastLogIdx})
+					commitApplyChMap[i] = append(commitApplyChMap[i], lastLogIdx)
 					commitApplyChMapMutex.Unlock()
-				} else {
+				} else if atomic.LoadInt32(&reply.Ok) == 0 {
 					lastLogIdx--
+				} else {
+					return
 				}
 			}
 			fmt.Println(i, " 同步成功")
 			commitApplyChMapMutex.Lock()
 			commitList = append(commitList, i)
+			fmt.Printf("%+v\n", commitList)
 			commitApplyChMapMutex.Unlock()
 		}()
 	}
@@ -436,10 +468,14 @@ func (rf *Raft) sendEntries(command interface{}, term int, server int32) {
 	commitApplyChMapMutex.Unlock()
 
 	if lencmls > len(rf.peers)/2 {
+
 		for _, i := range commitList {
 			k := 0
-			rf.peers[i].Call("Raft.SendApplyCh", commitApplyChMap[i], &k)
+			fmt.Printf("command %v提交给：%v: %v\n", command, i, commitApplyChMap[i])
+			go rf.peers[i].Call("Raft.SendApplyCh", commitApplyChMap[i], &k)
 		}
+	} else {
+		fmt.Printf("command %v follower不够\n", command)
 	}
 }
 
@@ -496,7 +532,7 @@ func (rf *Raft) ticker() {
 			args.Term = rf.currentTerm
 			args.Leader = rf.me
 			args.Entries = []LogEntry{}
-			args.Entries = append(args.Entries, LogEntry{nil, rf.currentTerm})
+			args.Entries = append(args.Entries, LogEntry{nil, rf.currentTerm, 0})
 			rf.mu.Unlock()
 			for idx, _ := range rf.peers {
 				i := idx
@@ -594,7 +630,7 @@ func (rf *Raft) ticker() {
 				args.Term = rf.currentTerm
 				args.Leader = rf.me
 				args.Entries = []LogEntry{}
-				args.Entries = append(args.Entries, LogEntry{nil, rf.currentTerm})
+				args.Entries = append(args.Entries, LogEntry{nil, rf.currentTerm, 0})
 				rf.mu.Unlock()
 				for idx, _ := range rf.peers {
 					i := idx
