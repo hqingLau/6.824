@@ -230,6 +230,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	rf.mu.Lock()
 	// fmt.Printf("原来%d votefor %d\n", rf.me, rf.voteFor)
 	defer rf.mu.Unlock()
+	fmt.Printf("me: %d, argsTerm:%d  rf: %+v\n", args.Me, args.CurrentTerm, rf)
 	if rf.state == StateFollower || args.CurrentTerm <= rf.currentTerm {
 		// fmt.Printf("---- false%d:%d rf.voteFor: %v term:%v\n", rf.me, rf.currentTerm, rf.voteFor, args.CurrentTerm)
 		return
@@ -246,7 +247,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	}
 
 	if reply.Ok == 1 {
-		// fmt.Printf("%d rf.voteFor: %v state:%v log:%v\n", rf.me, rf.voteFor, rf.state, rf.logs)
+		fmt.Printf("%d rf.voteFor: %v state:%v log:%v\n", rf.me, rf.voteFor, rf.state, rf.logs)
 	}
 
 }
@@ -269,7 +270,7 @@ type AppendEntriesArgs struct {
 }
 
 type AppendEntriesReply struct {
-	Ok                int32 // 0:fail 1,ok
+	Ok                int32 // 0:fail 1,ok,-1添加不成功，-2 leader 不是它了
 	FirstNotCommitted int32
 }
 
@@ -287,34 +288,33 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	// 所以收到之后，就是收到了心跳或者log，重置election timeout
 	atomic.StoreInt32(&reply.Ok, 0)
 	rf.mu.Lock()
-
 	defer rf.mu.Unlock()
-	defer func() {
-		if atomic.LoadInt32(&reply.Ok) == 1 {
-			fmt.Printf("%d: log: %+v\n", rf.me, rf.logs)
+
+	if rf.currentTerm > args.Term {
+		// -2 , 不为leader，变回follower
+		atomic.StoreInt32(&reply.Ok, -2)
+		return
+	}
+
+	rf.currentTerm = int64(max(int(rf.currentTerm), int(args.Term)))
+
+	if args.Entries[0].Command == nil {
+		atomic.StoreInt32(&reply.Ok, 1)
+		rf.recvHeartBeat = 1
+		rf.voteFor = -1
+
+		if rf.me != args.Leader {
+			rf.state = StateFollower
 		}
-	}()
+		return
+	}
 
 	// leader的term比follower还小，leader失效，返回
-	if rf.currentTerm > args.Term || args.LastLogIdx < 0 {
+	if args.LastLogIdx < 0 {
 		// 此次添加不可能成功，退出
 		atomic.StoreInt32(&reply.Ok, -1)
 		return
 	}
-
-	rf.currentTerm = args.Term
-	rf.recvHeartBeat = 1
-	rf.voteFor = -1
-
-	if rf.me != args.Leader {
-		rf.state = StateFollower
-	}
-
-	if args.Entries[0].Command == nil {
-		atomic.StoreInt32(&reply.Ok, 1)
-		return
-	}
-
 	// fmt.Printf("rf.me: %v, len rf logs: %v, args.LastLogIdx %d\n", rf.me, len(rf.logs), args.LastLogIdx)
 	// command entry
 	if args.LastLogIdx == 0 {
@@ -348,6 +348,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			}
 		}
 	}
+	fmt.Printf("%d: log: %+v\n", rf.me, rf.logs)
 	// fmt.Printf("日志：%d: %+v\n", rf.me, rf.logs)
 }
 
@@ -415,12 +416,15 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	rf.mu.Unlock()
 
 	if isLeader {
+		// time.Sleep(time.Millisecond*150)
+
 		rf.curCommandId++
 		go rf.sendEntries(command, term, rf.me, index)
 	}
-	if isLeader {
-		fmt.Printf("%d receive command: %v\n", rf.me, command)
+	{
+		fmt.Printf("%d(term:%d) receive command: %v\n", rf.me, rf.currentTerm, command)
 		fmt.Printf("%d %d %v\n", index, term, isLeader)
+		fmt.Printf("now rf.me %v logs: %+v\n", rf.me, rf.logs)
 	}
 
 	return index, term, isLeader
@@ -431,6 +435,13 @@ func min(a, b int) int {
 		return b
 	}
 	return a
+}
+
+func max(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
 }
 
 // 小写应该就行了，只是服务器调用，rpc调用AppendEntries
@@ -533,6 +544,10 @@ func (rf *Raft) sendEntries(command interface{}, term int, server int32, index i
 					firstLogAdd = false
 				} else if atomic.LoadInt32(&reply.Ok) == 0 {
 					lastLogIdx--
+				} else if atomic.LoadInt32(&reply.Ok) == -2 {
+					rf.mu.Lock()
+					rf.state = StateFollower
+					rf.mu.Unlock()
 				} else {
 					fmt.Println("loop break")
 					return
@@ -541,7 +556,7 @@ func (rf *Raft) sendEntries(command interface{}, term int, server int32, index i
 			// fmt.Println(i, " 同步成功")
 			commitApplyChMapMutex.Lock()
 			commitList = append(commitList, i)
-			fmt.Printf("%+v\n", commitList)
+			// fmt.Printf("%+v\n", commitList)
 			commitApplyChMapMutex.Unlock()
 		}()
 	}
@@ -552,7 +567,7 @@ func (rf *Raft) sendEntries(command interface{}, term int, server int32, index i
 	commitApplyChMapMutex.Unlock()
 
 	if lencmls > len(rf.peers)/2 {
-		fmt.Printf("send map: %v\n", commitApplyChMap[int(rf.me)])
+		// fmt.Printf("send map: %v\n", commitApplyChMap[int(rf.me)])
 		commitApplyChMapMutex.Lock()
 		for i := leaderSendMin; i <= lenrflogs; i++ {
 			commitApplyChMap[int(rf.me)] = append(commitApplyChMap[int(rf.me)], i)
@@ -632,8 +647,8 @@ func (rf *Raft) ticker() {
 				go func() {
 					replies[i] = AppendEntriesReply{-1, -1}
 					rf.peers[i].Call("Raft.AppendEntries", args, &replies[i])
-					time.Sleep(time.Millisecond * 100)
-					if atomic.LoadInt32(&replies[i].Ok) == 0 {
+					// time.Sleep(time.Millisecond * 100)
+					if atomic.LoadInt32(&replies[i].Ok) == -2 {
 						rf.mu.Lock()
 						rf.state = StateFollower
 						rf.mu.Unlock()
@@ -643,7 +658,7 @@ func (rf *Raft) ticker() {
 
 		} else if curState == StateFollower {
 			// 目前应该看不到candidate状态
-			randTime := 100 + rand.Intn(100)
+			randTime := 200 + rand.Intn(200)
 			time.Sleep(time.Millisecond * time.Duration(randTime))
 
 			rf.mu.Lock()
@@ -661,7 +676,7 @@ func (rf *Raft) ticker() {
 			rf.mu.Unlock()
 		} else {
 			// candidate, 请求成为leader
-			randTime := rand.Intn(600)
+			randTime := rand.Intn(200)
 			time.Sleep(time.Millisecond * time.Duration(randTime))
 			rf.mu.Lock()
 			if rf.recvHeartBeat == 1 {
@@ -699,12 +714,12 @@ func (rf *Raft) ticker() {
 						atomic.AddInt32(&voteCount, replies[i].Ok)
 					}()
 				}
-				time.Sleep(time.Millisecond * 100)
+				time.Sleep(time.Millisecond * 50)
 			} else {
 				rf.mu.Unlock()
 			}
 
-			// fmt.Printf("%d voteCount: %v\n", rf.me, voteCount)
+			fmt.Printf("%d voteCount: %v\n", rf.me, voteCount)
 			if int(atomic.LoadInt32(&voteCount)) > peerCount/2 {
 				fmt.Println("leader: ", rf.me)
 
@@ -731,17 +746,17 @@ func (rf *Raft) ticker() {
 					go func() {
 						replies[i] = AppendEntriesReply{-1, -1}
 						rf.peers[i].Call("Raft.AppendEntries", args, &replies[i])
-						time.Sleep(time.Millisecond * 100)
-						if atomic.LoadInt32(&replies[i].Ok) == 0 {
-							rf.mu.Lock()
-							rf.state = StateFollower
-							rf.mu.Unlock()
-						}
+						// time.Sleep(time.Millisecond * 100)
+						// if atomic.LoadInt32(&replies[i].Ok) == -2 {
+						// 	rf.mu.Lock()
+						// 	rf.state = StateFollower
+						// 	rf.mu.Unlock()
+						// }
 					}()
 				}
 
 			} else {
-				// fmt.Println(rf.me, " 本轮选举失败")
+				fmt.Println(rf.me, " 本轮选举失败")
 				// 自己失败了，别的仍可能成功，所以要等待超时
 				// 没有选举成功，成为follower，继续等待超时
 				rf.mu.Lock()
