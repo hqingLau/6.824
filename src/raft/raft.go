@@ -84,6 +84,7 @@ type Raft struct {
 	logs          []LogEntry //日志
 	voteFor       int32      // 是否已经投票,没投为-1
 	applyCh       chan ApplyMsg
+	curCommandId  int32 // 如果有用户请求，该赋予的ID
 }
 
 // return currentTerm and whether this server
@@ -106,22 +107,27 @@ type ApplyMsgIdList []int
 
 func (rf *Raft) SendApplyCh(entries ApplyMsgIdList, reply *int) {
 	// 这里顺序乱掉了，还没改，估计要判断一下前者的状态，然后做个等待。
-	// hqinglau@centos:~/6.824/src/raft$ cat a.txt | grep "2: ch msg"
-	// 2: ch msg: {true 10 1 false [] 0 0}
-	// 2: ch msg: {true 30 3 false [] 0 0}
-	// 2: ch msg: {true 1000 2 false [] 0 0}
-	// hqinglau@centos:~/6.824/src/raft$ cat a.txt | grep "3: ch msg"
-	// 3: ch msg: {true 10 1 false [] 0 0}
-	// 3: ch msg: {true 1000 2 false [] 0 0}
-	// 3: ch msg: {true 30 3 false [] 0 0}
 	for _, idx := range entries {
-		rf.mu.Lock()
-		logEntry := rf.logs[idx-1]
-		if rf.logs[idx-1].Committed == 1 {
-			rf.mu.Unlock()
+
+		if idx >= 2 {
+			committed := atomic.LoadInt32(&rf.logs[idx-2].Committed)
+			for committed == 0 {
+				time.Sleep(time.Millisecond * 50)
+				committed = atomic.LoadInt32(&rf.logs[idx-2].Committed)
+			}
+		}
+
+		if idx < 1 {
 			continue
 		}
+		rf.mu.Lock()
+		logEntry := rf.logs[idx-1]
 		msg := ApplyMsg{CommandValid: true, Command: logEntry.Command, CommandIndex: idx}
+		if rf.logs[idx-1].Committed == 1 {
+			rf.mu.Unlock()
+			fmt.Printf("%v已发送+%v\n", rf.me, msg)
+			continue
+		}
 
 		fmt.Printf("%d: ch msg: %v\n", rf.me, msg)
 		rf.mu.Unlock()
@@ -263,7 +269,8 @@ type AppendEntriesArgs struct {
 }
 
 type AppendEntriesReply struct {
-	Ok int32 // 0:fail 1,ok
+	Ok                int32 // 0:fail 1,ok
+	FirstNotCommitted int32
 }
 
 // args.Term = int64(term)
@@ -282,6 +289,11 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	rf.mu.Lock()
 
 	defer rf.mu.Unlock()
+	defer func() {
+		if atomic.LoadInt32(&reply.Ok) == 1 {
+			fmt.Printf("%d: log: %+v\n", rf.me, rf.logs)
+		}
+	}()
 
 	// leader的term比follower还小，leader失效，返回
 	if rf.currentTerm > args.Term || args.LastLogIdx < 0 {
@@ -303,9 +315,11 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		return
 	}
 
+	// fmt.Printf("rf.me: %v, len rf logs: %v, args.LastLogIdx %d\n", rf.me, len(rf.logs), args.LastLogIdx)
 	// command entry
 	if args.LastLogIdx == 0 {
 		// 说明本条log是第一条，必须加上
+		// fmt.Printf("rf.me: %v 第一条，必须加上，%v\n", rf.me, args.Entries)
 		rf.logs = append(rf.logs, args.Entries...)
 		atomic.StoreInt32(&reply.Ok, 1)
 	} else {
@@ -314,6 +328,16 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		if len(rf.logs) == args.LastLogIdx {
 			if rf.logs[args.LastLogIdx-1].Term == int64(args.LastTerm) {
 				rf.logs = append(rf.logs, args.Entries...)
+				firstNotCommitted := args.LastLogIdx - 1
+				if args.Info == "firstLogAdd" {
+					for firstNotCommitted >= 0 && rf.logs[firstNotCommitted].Committed == 0 {
+						firstNotCommitted--
+					}
+				}
+				if firstNotCommitted < 0 {
+					firstNotCommitted = 0
+				}
+				atomic.StoreInt32(&reply.FirstNotCommitted, int32(firstNotCommitted))
 				atomic.StoreInt32(&reply.Ok, 1)
 			}
 		} else if len(rf.logs) > args.LastLogIdx {
@@ -324,7 +348,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			}
 		}
 	}
-	fmt.Printf("日志：%d: %+v\n", rf.me, rf.logs)
+	// fmt.Printf("日志：%d: %+v\n", rf.me, rf.logs)
 }
 
 //
@@ -381,43 +405,75 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	term := -1
 	isLeader := true
 
+	// Your code here (2B).
 	rf.mu.Lock()
-	index = len(rf.logs) + 1
+
+	index = int(rf.curCommandId)
+
 	term = int(rf.currentTerm)
 	isLeader = (!rf.killed()) && (rf.state == StateLeader)
 	rf.mu.Unlock()
+
 	if isLeader {
-		go rf.sendEntries(command, term, rf.me)
+		rf.curCommandId++
+		go rf.sendEntries(command, term, rf.me, index)
 	}
-	// Your code here (2B).
+	if isLeader {
+		fmt.Printf("%d receive command: %v\n", rf.me, command)
+		fmt.Printf("%d %d %v\n", index, term, isLeader)
+	}
 
 	return index, term, isLeader
 }
 
+func min(a, b int) int {
+	if a > b {
+		return b
+	}
+	return a
+}
+
 // 小写应该就行了，只是服务器调用，rpc调用AppendEntries
 // 可能要server log对齐，需要term信息, 如果command为nil表示是leader当选的信号
-func (rf *Raft) sendEntries(command interface{}, term int, server int32) {
+func (rf *Raft) sendEntries(command interface{}, term int, server int32, index int) {
 	// 不能通过此处添加nil指令，nil用作leader选举通知
 	if command == nil {
 		return
 	}
 
-	// 先给本地加上log
+	for {
+		rf.mu.Lock()
+		if len(rf.logs)+1 != index {
+			rf.mu.Unlock()
+			time.Sleep(time.Millisecond * 10)
+		} else {
+			rf.mu.Unlock()
+			break
+		}
+	}
 	rf.mu.Lock()
-	rf.logs = append(rf.logs, LogEntry{Command: command, Term: int64(term)})
-	rf.mu.Unlock()
+	// if rf.logs[len(rf.logs)-1].Committed != 1 {
+	// 	time.Sleep(250)
+	// }
+
+	// 先给本地加上log
+
+	rf.logs = append(rf.logs, LogEntry{Command: command, Term: int64(term), Committed: 0})
 
 	// term和logidx都设成从1开始好了
 
-	rf.mu.Lock()
-	defer fmt.Printf("%d最后: %+v\n", rf.me, rf.logs)
+	// defer fmt.Printf("%d最后: %+v\n", rf.me, rf.logs)
 	commitApplyChMap := make(map[int]ApplyMsgIdList) // 存储log的id就行，然后发送给follower，让follower自己处理
 	for i := 0; i < len(rf.peers); i++ {
 		commitApplyChMap[i] = []int{}
 	}
-	commitApplyChMap[int(rf.me)] = append(commitApplyChMap[int(rf.me)], int(len(rf.logs)))
+	lenrflogs := int(len(rf.logs))
+	// commitApplyChMap[int(rf.me)] = append(commitApplyChMap[int(rf.me)], int(len(rf.logs)))
 	commitApplyChMapMutex := sync.Mutex{}
 	commitList := []int{int(rf.me)}
+	// leader可能之前没成功，leader的ch也要考虑发送
+	// 把要发给follower的重新记录一下，都给leader。
+	leaderSendMin := int(len(rf.logs))
 	for idx, _ := range rf.peers {
 		i := idx
 		if i == int(rf.me) {
@@ -426,7 +482,7 @@ func (rf *Raft) sendEntries(command interface{}, term int, server int32) {
 
 		go func() {
 			rf.mu.Lock()
-			lastLogIdx := len(rf.logs) - 1 // 例如之前已经有一条消息，这是第二条，last就是1
+			lastLogIdx := lenrflogs - 1 // 例如之前已经有一条消息，这是第二条，last就是1
 			if lastLogIdx < 0 {
 				rf.mu.Unlock()
 				return
@@ -434,11 +490,13 @@ func (rf *Raft) sendEntries(command interface{}, term int, server int32) {
 			rf.mu.Unlock()
 
 			// 等于0说明不对应，加不上，尝试加前一个
+			firstLogAdd := true // 第一个要添加或者更改的log，要负责把以前未提交的log也返回
 			for {
 				args := AppendEntriesArgs{}
-				reply := AppendEntriesReply{0}
+				reply := AppendEntriesReply{0, int32(lastLogIdx)}
 				rf.mu.Lock()
-				if lastLogIdx >= len(rf.logs) || lastLogIdx < 0 {
+				if lastLogIdx >= lenrflogs || lastLogIdx < 0 {
+					// fmt.Printf("lastLogIdx: %d,len(rf.logs): %d\n", lastLogIdx, len(rf.logs))
 					rf.mu.Unlock()
 					break
 				}
@@ -457,20 +515,30 @@ func (rf *Raft) sendEntries(command interface{}, term int, server int32) {
 					Committed: 0,
 				})
 				rf.mu.Unlock()
+				if firstLogAdd {
+					args.Info = "firstLogAdd"
+				}
 
 				rf.peers[i].Call("Raft.AppendEntries", &args, &reply)
+
 				if atomic.LoadInt32(&reply.Ok) == 1 {
 					lastLogIdx++
 					commitApplyChMapMutex.Lock()
-					commitApplyChMap[i] = append(commitApplyChMap[i], lastLogIdx)
+					for k := atomic.LoadInt32(&reply.FirstNotCommitted); k <= int32(lastLogIdx); k++ {
+						commitApplyChMap[i] = append(commitApplyChMap[i], int(k))
+					}
+					//commitApplyChMap[i] = append(commitApplyChMap[i], lastLogIdx)
+					leaderSendMin = min(leaderSendMin, lastLogIdx)
 					commitApplyChMapMutex.Unlock()
+					firstLogAdd = false
 				} else if atomic.LoadInt32(&reply.Ok) == 0 {
 					lastLogIdx--
 				} else {
+					fmt.Println("loop break")
 					return
 				}
 			}
-			fmt.Println(i, " 同步成功")
+			// fmt.Println(i, " 同步成功")
 			commitApplyChMapMutex.Lock()
 			commitList = append(commitList, i)
 			fmt.Printf("%+v\n", commitList)
@@ -478,12 +546,20 @@ func (rf *Raft) sendEntries(command interface{}, term int, server int32) {
 		}()
 	}
 	rf.mu.Unlock()
-	time.Sleep(time.Millisecond * 500)
+	time.Sleep(time.Millisecond * 200)
 	commitApplyChMapMutex.Lock()
 	lencmls := len(commitList)
 	commitApplyChMapMutex.Unlock()
 
 	if lencmls > len(rf.peers)/2 {
+		fmt.Printf("send map: %v\n", commitApplyChMap[int(rf.me)])
+		commitApplyChMapMutex.Lock()
+		for i := leaderSendMin; i <= lenrflogs; i++ {
+			commitApplyChMap[int(rf.me)] = append(commitApplyChMap[int(rf.me)], i)
+
+		}
+		// fmt.Printf("command %v提交给：%v: %v\n", command, rf.me, commitApplyChMap[int(rf.me)])
+		commitApplyChMapMutex.Unlock()
 
 		for _, i := range commitList {
 			k := 0
@@ -491,7 +567,7 @@ func (rf *Raft) sendEntries(command interface{}, term int, server int32) {
 			go rf.peers[i].Call("Raft.SendApplyCh", commitApplyChMap[i], &k)
 		}
 	} else {
-		fmt.Printf("command %v follower不够\n", command)
+		// fmt.Printf("command %v follower不够\n", command)
 	}
 }
 
@@ -544,6 +620,7 @@ func (rf *Raft) ticker() {
 				continue
 			}
 			rf.state = StateLeader
+			rf.curCommandId = int32(len(rf.logs) + 1)
 			// 称为leader, 通知别人
 			args.Term = rf.currentTerm
 			args.Leader = rf.me
@@ -553,7 +630,7 @@ func (rf *Raft) ticker() {
 			for idx, _ := range rf.peers {
 				i := idx
 				go func() {
-					replies[i] = AppendEntriesReply{-1}
+					replies[i] = AppendEntriesReply{-1, -1}
 					rf.peers[i].Call("Raft.AppendEntries", args, &replies[i])
 					time.Sleep(time.Millisecond * 100)
 					if atomic.LoadInt32(&replies[i].Ok) == 0 {
@@ -641,6 +718,7 @@ func (rf *Raft) ticker() {
 					continue
 				}
 				rf.state = StateLeader
+				rf.curCommandId = int32(len(rf.logs) + 1)
 				// 称为leader, 通知别人
 				rf.currentTerm = rf.currentTerm + 1
 				args.Term = rf.currentTerm
@@ -651,7 +729,7 @@ func (rf *Raft) ticker() {
 				for idx, _ := range rf.peers {
 					i := idx
 					go func() {
-						replies[i] = AppendEntriesReply{-1}
+						replies[i] = AppendEntriesReply{-1, -1}
 						rf.peers[i].Call("Raft.AppendEntries", args, &replies[i])
 						time.Sleep(time.Millisecond * 100)
 						if atomic.LoadInt32(&replies[i].Ok) == 0 {
@@ -698,6 +776,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.logs = []LogEntry{}
 	rf.state = StateFollower
 	rf.recvHeartBeat = 0
+	rf.curCommandId = 1
 	rf.applyCh = applyCh
 
 	// Your initialization code here (2A, 2B, 2C).
