@@ -290,6 +290,17 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
+	if args.Entries[0].Command == nil {
+		atomic.StoreInt32(&reply.Ok, 1)
+		rf.recvHeartBeat = 1
+		rf.voteFor = -1
+		rf.currentTerm = args.Term
+		if rf.me != args.Leader {
+			rf.state = StateFollower
+		}
+		return
+	}
+
 	if rf.currentTerm > args.Term {
 		// -2 , 不为leader，变回follower
 		atomic.StoreInt32(&reply.Ok, -2)
@@ -297,17 +308,6 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	}
 
 	rf.currentTerm = int64(max(int(rf.currentTerm), int(args.Term)))
-
-	if args.Entries[0].Command == nil {
-		atomic.StoreInt32(&reply.Ok, 1)
-		rf.recvHeartBeat = 1
-		rf.voteFor = -1
-
-		if rf.me != args.Leader {
-			rf.state = StateFollower
-		}
-		return
-	}
 
 	// leader的term比follower还小，leader失效，返回
 	if args.LastLogIdx < 0 {
@@ -530,6 +530,7 @@ func (rf *Raft) sendEntries(command interface{}, term int, server int32, index i
 					args.Info = "firstLogAdd"
 				}
 
+				fmt.Println(args.LastLogIdx, "call 添加========")
 				rf.peers[i].Call("Raft.AppendEntries", &args, &reply)
 
 				if atomic.LoadInt32(&reply.Ok) == 1 {
@@ -548,6 +549,7 @@ func (rf *Raft) sendEntries(command interface{}, term int, server int32, index i
 					rf.mu.Lock()
 					rf.state = StateFollower
 					rf.mu.Unlock()
+					return
 				} else {
 					fmt.Println("loop break")
 					return
@@ -579,7 +581,10 @@ func (rf *Raft) sendEntries(command interface{}, term int, server int32, index i
 		for _, i := range commitList {
 			k := 0
 			fmt.Printf("command %v提交给：%v: %v\n", command, i, commitApplyChMap[i])
-			go rf.peers[i].Call("Raft.SendApplyCh", commitApplyChMap[i], &k)
+			if len(commitApplyChMap[i]) != 0 {
+				go rf.peers[i].Call("Raft.SendApplyCh", commitApplyChMap[i], &k)
+			}
+
 		}
 	} else {
 		// fmt.Printf("command %v follower不够\n", command)
@@ -623,9 +628,26 @@ func (rf *Raft) ticker() {
 		curState := rf.state
 		rf.mu.Unlock()
 		// fmt.Printf("%v: state: %v\n", rf.me, rf.state)
+		lastResp := len(rf.peers)
+		curResp := int32(len(rf.peers))
 		if curState == StateLeader {
 
 			time.Sleep(time.Millisecond * 100)
+			lastResp = int(curResp)
+
+			if lastResp <= len(rf.peers)/2 {
+				time.Sleep(time.Millisecond * 50)
+				if lastResp <= len(rf.peers)/2 {
+					rf.mu.Lock()
+					rf.state = StateFollower
+					rf.recvHeartBeat = 0
+					rf.mu.Unlock()
+					// time.Sleep(time.Millisecond * 100)
+					continue
+				}
+
+			}
+			curResp = int32(0)
 			// 群发心跳
 			args := new(AppendEntriesArgs)
 			replies := make([]AppendEntriesReply, len(rf.peers))
@@ -648,11 +670,12 @@ func (rf *Raft) ticker() {
 					replies[i] = AppendEntriesReply{-1, -1}
 					rf.peers[i].Call("Raft.AppendEntries", args, &replies[i])
 					// time.Sleep(time.Millisecond * 100)
-					if atomic.LoadInt32(&replies[i].Ok) == -2 {
-						rf.mu.Lock()
-						rf.state = StateFollower
-						rf.mu.Unlock()
-					}
+					// if atomic.LoadInt32(&replies[i].Ok) == -2 {
+					// 	rf.mu.Lock()
+					// 	rf.state = StateFollower
+					// 	rf.mu.Unlock()
+					// }
+					atomic.AddInt32(&curResp, 1)
 				}()
 			}
 
@@ -676,7 +699,7 @@ func (rf *Raft) ticker() {
 			rf.mu.Unlock()
 		} else {
 			// candidate, 请求成为leader
-			randTime := rand.Intn(200)
+			randTime := rand.Intn(300)
 			time.Sleep(time.Millisecond * time.Duration(randTime))
 			rf.mu.Lock()
 			if rf.recvHeartBeat == 1 {
@@ -714,7 +737,7 @@ func (rf *Raft) ticker() {
 						atomic.AddInt32(&voteCount, replies[i].Ok)
 					}()
 				}
-				time.Sleep(time.Millisecond * 50)
+				time.Sleep(time.Millisecond * 200)
 			} else {
 				rf.mu.Unlock()
 			}
@@ -760,7 +783,7 @@ func (rf *Raft) ticker() {
 				// 自己失败了，别的仍可能成功，所以要等待超时
 				// 没有选举成功，成为follower，继续等待超时
 				rf.mu.Lock()
-				rf.state = StateFollower
+				rf.voteFor = -1
 				rf.mu.Unlock()
 			}
 		}
