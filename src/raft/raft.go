@@ -121,6 +121,7 @@ func (rf *Raft) SendApplyCh(entries ApplyMsgIdList, reply *int) {
 			continue
 		}
 		rf.mu.Lock()
+		fmt.Printf("++++++++++++rf.me: %v, rf.logs: %v\n", rf.me, rf.logs)
 		logEntry := rf.logs[idx-1]
 		msg := ApplyMsg{CommandValid: true, Command: logEntry.Command, CommandIndex: idx}
 		if rf.logs[idx-1].Committed == 1 {
@@ -271,6 +272,7 @@ type AppendEntriesArgs struct {
 
 type AppendEntriesReply struct {
 	Ok                int32 // 0:fail 1,ok,-1添加不成功，-2 leader 不是它了
+	FirstBeforeLogIdx int32 // 当前item entry之前的一个lastLogIdx
 	FirstNotCommitted int32
 }
 
@@ -322,6 +324,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		// fmt.Printf("rf.me: %v 第一条，必须加上，%v\n", rf.me, args.Entries)
 		rf.logs = append(rf.logs, args.Entries...)
 		atomic.StoreInt32(&reply.Ok, 1)
+		return
 	} else {
 		// args.LastLogIdx > 0
 		// 例如：
@@ -339,15 +342,39 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 				}
 				atomic.StoreInt32(&reply.FirstNotCommitted, int32(firstNotCommitted))
 				atomic.StoreInt32(&reply.Ok, 1)
+				return
 			}
 		} else if len(rf.logs) > args.LastLogIdx {
 			if rf.logs[args.LastLogIdx-1].Term == int64(args.LastTerm) {
-				rf.logs[args.LastLogIdx].Term = args.Entries[0].Term
-				rf.logs[args.LastLogIdx].Command = args.Entries[0].Command
+				// 前一个匹配上了，就把后面的数据有数据全部覆盖，无数据全部append
+				argsLastLogIdx := args.LastLogIdx
+				for k := 0; k < len(args.Entries); k++ {
+					if len(rf.logs) <= argsLastLogIdx {
+						rf.logs = append(rf.logs, args.Entries[k])
+					} else {
+						rf.logs[argsLastLogIdx].Term = args.Entries[k].Term
+						rf.logs[argsLastLogIdx].Command = args.Entries[k].Command
+					}
+					argsLastLogIdx++
+				}
+
 				atomic.StoreInt32(&reply.Ok, 1)
+				return
 			}
 		}
 	}
+	argsLastLogIdx := args.LastLogIdx
+	if args.LastLogIdx > len(rf.logs) {
+		for argsLastLogIdx > len(rf.logs) {
+			argsLastLogIdx--
+		}
+	} else {
+		for argsLastLogIdx > 0 && rf.logs[args.LastLogIdx-1].Term == rf.logs[argsLastLogIdx-1].Term {
+			argsLastLogIdx--
+		}
+	}
+
+	atomic.StoreInt32(&reply.FirstBeforeLogIdx, int32(argsLastLogIdx))
 	fmt.Printf("%d: log: %+v\n", rf.me, rf.logs)
 	// fmt.Printf("日志：%d: %+v\n", rf.me, rf.logs)
 }
@@ -504,7 +531,7 @@ func (rf *Raft) sendEntries(command interface{}, term int, server int32, index i
 			firstLogAdd := true // 第一个要添加或者更改的log，要负责把以前未提交的log也返回
 			for {
 				args := AppendEntriesArgs{}
-				reply := AppendEntriesReply{0, int32(lastLogIdx)}
+				reply := AppendEntriesReply{0, int32(lastLogIdx), -1}
 				rf.mu.Lock()
 				if lastLogIdx >= lenrflogs || lastLogIdx < 0 {
 					// fmt.Printf("lastLogIdx: %d,len(rf.logs): %d\n", lastLogIdx, len(rf.logs))
@@ -520,11 +547,15 @@ func (rf *Raft) sendEntries(command interface{}, term int, server int32, index i
 				args.Entries = []LogEntry{}
 				// args.Entries = append(args.Entries, rf.logs[lastLogIdx])
 				// 这里之前复制的rflogs，但是那个是已提交状态，就会干扰现在的chan发送
-				args.Entries = append(args.Entries, LogEntry{
-					Command:   rf.logs[lastLogIdx].Command,
-					Term:      rf.logs[lastLogIdx].Term,
-					Committed: 0,
-				})
+				fmt.Printf("leader rf.logs: %v\n", rf.logs)
+				for i := lastLogIdx; i < len(rf.logs); i++ {
+					args.Entries = append(args.Entries, LogEntry{
+						Command:   rf.logs[i].Command,
+						Term:      rf.logs[i].Term,
+						Committed: 0,
+					})
+				}
+
 				rf.mu.Unlock()
 				if firstLogAdd {
 					args.Info = "firstLogAdd"
@@ -543,8 +574,10 @@ func (rf *Raft) sendEntries(command interface{}, term int, server int32, index i
 					leaderSendMin = min(leaderSendMin, lastLogIdx)
 					commitApplyChMapMutex.Unlock()
 					firstLogAdd = false
+					break
 				} else if atomic.LoadInt32(&reply.Ok) == 0 {
-					lastLogIdx--
+					// lastLogIdx--
+					lastLogIdx = int(atomic.LoadInt32(&reply.FirstBeforeLogIdx))
 				} else if atomic.LoadInt32(&reply.Ok) == -2 {
 					rf.mu.Lock()
 					rf.state = StateFollower
@@ -667,7 +700,7 @@ func (rf *Raft) ticker() {
 			for idx, _ := range rf.peers {
 				i := idx
 				go func() {
-					replies[i] = AppendEntriesReply{-1, -1}
+					replies[i] = AppendEntriesReply{-1, -1, 0}
 					rf.peers[i].Call("Raft.AppendEntries", args, &replies[i])
 					// time.Sleep(time.Millisecond * 100)
 					// if atomic.LoadInt32(&replies[i].Ok) == -2 {
@@ -767,7 +800,7 @@ func (rf *Raft) ticker() {
 				for idx, _ := range rf.peers {
 					i := idx
 					go func() {
-						replies[i] = AppendEntriesReply{-1, -1}
+						replies[i] = AppendEntriesReply{-1, -1, 0}
 						rf.peers[i].Call("Raft.AppendEntries", args, &replies[i])
 						// time.Sleep(time.Millisecond * 100)
 						// if atomic.LoadInt32(&replies[i].Ok) == -2 {
