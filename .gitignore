@@ -5,3 +5,4 @@ api.key
 .api.key.trimmed
 *-handin.tar.gz
 .vscode/
+src/raft/*.txt
