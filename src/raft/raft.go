@@ -112,7 +112,7 @@ func (rf *Raft) GetState() (int, bool) {
 }
 
 func (rf *Raft) Commit(commitIdx *int, reply *int32) {
-	// fmt.Printf("rf.me %v commit %v\n", rf.me, *commitIdx)
+	fmt.Printf("rf.me %v commit %v\n", rf.me, *commitIdx)
 	rf.mu.Lock()
 	idx := *commitIdx
 	curid := idx
@@ -127,7 +127,7 @@ func (rf *Raft) Commit(commitIdx *int, reply *int32) {
 		}
 		rf.mu.Lock()
 		rf.logs[i-1].Committed = 1
-		// fmt.Printf("rf.me %v logs %v\n", rf.me, rf.logs)
+		fmt.Printf("rf.me %v logs %v\n", rf.me, rf.logs)
 		rf.commitIdx = int32(max(int(rf.commitIdx), i))
 		rf.mu.Unlock()
 
@@ -144,7 +144,7 @@ func (rf *Raft) sendApplyCh() {
 			msg := ApplyMsg{CommandValid: true, Command: rf.logs[rf.lastApplyed].Command, CommandIndex: int(rf.lastApplyed + 1)}
 			rf.mu.Unlock()
 			rf.applyCh <- msg
-			// fmt.Printf("rf.me %v: sendChan: %v\n", rf.me, msg)
+			fmt.Printf("rf.me %v: sendChan: %v\n", rf.me, msg)
 			rf.mu.Lock()
 			rf.lastApplyed++
 		} else {
@@ -335,6 +335,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	rf.mu.Lock()
 	//defer rf.persist()
 	defer rf.mu.Unlock()
+	defer fmt.Printf("%d（term: %v）: log: %+v\n", rf.me, rf.currentTerm, rf.logs)
 
 	if args.Entries[0].Command == nil {
 		if rf.currentTerm > args.Term {
@@ -349,6 +350,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		if rf.me != args.Leader {
 			rf.state = StateFollower
 		}
+		atomic.StoreInt32(&reply.Ok, 1)
 		return
 	}
 
@@ -390,7 +392,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		}
 	}
 	atomic.StoreInt32(&reply.Ok, 1)
-	// fmt.Printf("%d（term: %v）: log: %+v\n", rf.me, rf.currentTerm, rf.logs)
+
 }
 
 //
@@ -459,12 +461,14 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	if isLeader {
 		// time.Sleep(time.Millisecond*150)
 		rf.mu.Lock()
-		// fmt.Printf("rf.me %d receive command %v", rf.me, command)
+		fmt.Printf("rf.me %d receive command %v\n", rf.me, command)
 		// 加上，后台慢慢同步
 		rf.logs = append(rf.logs, LogEntry{Command: command, Term: int64(term), Committed: 0})
 
 		rf.mu.Unlock()
 		// rf.persist()
+	} else {
+		fmt.Printf("nooooooo rf.me %d receive command %v %v\n", rf.me, command, isLeader)
 	}
 
 	return index, term, isLeader
@@ -670,13 +674,10 @@ func (rf *Raft) ticker() {
 
 					replies[i] = AppendEntriesReply{-1}
 					rf.peers[i].Call("Raft.AppendEntries", args, &replies[i])
-					// time.Sleep(time.Millisecond * 100)
-					// if atomic.LoadInt32(&replies[i].Ok) == -2 {
-					// 	rf.mu.Lock()
-					// 	rf.state = StateFollower
-					// 	rf.mu.Unlock()
-					// }
-					atomic.AddInt32(&curResp, 1)
+					if atomic.LoadInt32(&replies[i].Ok) == 1 {
+						atomic.AddInt32(&curResp, 1)
+					}
+
 				}()
 			}
 
@@ -693,7 +694,7 @@ func (rf *Raft) ticker() {
 				rf.recvHeartBeat = 0
 			} else {
 				// 有段时间没收到心跳了，成为candidate
-				// fmt.Printf("%d 超时称为candidate\n", rf.me)
+				fmt.Printf("%d 超时称为candidate\n", rf.me)
 				rf.state = StateCandidate
 				rf.voteFor = -1
 			}
