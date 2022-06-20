@@ -83,8 +83,12 @@ type Raft struct {
 	state         int32      // state: follower, :candidate, :Leader
 	logs          []LogEntry //日志
 	voteFor       int32      // 是否已经投票,没投为-1
-	applyCh       chan ApplyMsg
-	curCommandId  int32 // 如果有用户请求，该赋予的ID
+
+	// 2B
+	applyCh      chan ApplyMsg
+	curCommandId int32 // 如果有用户请求，该赋予的ID
+	commitIdx    int32 //已经commit的最新log index
+	lastApplyed  int32 // 已经应用的最新的，2b这里就是最新发给applych的
 }
 
 // return currentTerm and whether this server
@@ -105,35 +109,33 @@ func (rf *Raft) GetState() (int, bool) {
 
 type ApplyMsgIdList []int
 
-func (rf *Raft) SendApplyCh(entries ApplyMsgIdList, reply *int) {
-	// 这里顺序乱掉了，还没改，估计要判断一下前者的状态，然后做个等待。
+func (rf *Raft) Commit(entries ApplyMsgIdList, reply *int) {
 	for _, idx := range entries {
-
-		if idx >= 2 {
-			committed := atomic.LoadInt32(&rf.logs[idx-2].Committed)
-			for committed == 0 {
-				time.Sleep(time.Millisecond * 50)
-				committed = atomic.LoadInt32(&rf.logs[idx-2].Committed)
-			}
-		}
-
 		if idx < 1 {
 			continue
 		}
 		rf.mu.Lock()
-		logEntry := rf.logs[idx-1]
-		msg := ApplyMsg{CommandValid: true, Command: logEntry.Command, CommandIndex: idx}
-		if rf.logs[idx-1].Committed == 1 {
-			rf.mu.Unlock()
-			fmt.Printf("%v已发送+%v\n", rf.me, msg)
-			continue
-		}
-
-		fmt.Printf("%d: ch msg: %v\n", rf.me, msg)
-		rf.mu.Unlock()
-		rf.applyCh <- msg
-		rf.mu.Lock()
 		rf.logs[idx-1].Committed = 1
+		rf.commitIdx = int32(idx)
+		rf.mu.Unlock()
+	}
+}
+
+func (rf *Raft) sendApplyCh() {
+	// 这里顺序乱掉了，还没改，估计要判断一下前者的状态，然后做个等待。
+	for !rf.killed() {
+		rf.mu.Lock()
+		if rf.lastApplyed < rf.commitIdx {
+			msg := ApplyMsg{CommandValid: true, Command: rf.logs[rf.lastApplyed].Command, CommandIndex: int(rf.lastApplyed + 1)}
+			rf.mu.Unlock()
+			rf.applyCh <- msg
+			rf.mu.Lock()
+			rf.lastApplyed++
+		} else {
+			rf.mu.Unlock()
+			time.Sleep(time.Millisecond * 50)
+			rf.mu.Lock()
+		}
 		rf.mu.Unlock()
 	}
 }
@@ -230,7 +232,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	rf.mu.Lock()
 	// fmt.Printf("原来%d votefor %d\n", rf.me, rf.voteFor)
 	defer rf.mu.Unlock()
-	fmt.Printf("me: %d, argsTerm:%d  rf: %+v\n", args.Me, args.CurrentTerm, rf)
+	// fmt.Printf("me: %d, argsTerm:%d  rf: %+v\n", args.Me, args.CurrentTerm, rf)
 	if rf.state == StateFollower || args.CurrentTerm <= rf.currentTerm {
 		// fmt.Printf("---- false%d:%d rf.voteFor: %v term:%v\n", rf.me, rf.currentTerm, rf.voteFor, args.CurrentTerm)
 		return
@@ -247,7 +249,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	}
 
 	if reply.Ok == 1 {
-		fmt.Printf("%d rf.voteFor: %v state:%v log:%v\n", rf.me, rf.voteFor, rf.state, rf.logs)
+		// fmt.Printf("%d rf.voteFor: %v state:%v log:%v\n", rf.me, rf.voteFor, rf.state, rf.logs)
 	}
 
 }
@@ -348,7 +350,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			}
 		}
 	}
-	fmt.Printf("%d: log: %+v\n", rf.me, rf.logs)
+	// fmt.Printf("%d: log: %+v\n", rf.me, rf.logs)
 	// fmt.Printf("日志：%d: %+v\n", rf.me, rf.logs)
 }
 
@@ -417,14 +419,15 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 
 	if isLeader {
 		// time.Sleep(time.Millisecond*150)
-
+		rf.mu.Lock()
 		rf.curCommandId++
+		rf.mu.Unlock()
 		go rf.sendEntries(command, term, rf.me, index)
 	}
 	{
-		fmt.Printf("%d(term:%d) receive command: %v\n", rf.me, rf.currentTerm, command)
-		fmt.Printf("%d %d %v\n", index, term, isLeader)
-		fmt.Printf("now rf.me %v logs: %+v\n", rf.me, rf.logs)
+		// fmt.Printf("%d(term:%d) receive command: %v\n", rf.me, rf.currentTerm, command)
+		// fmt.Printf("%d %d %v\n", index, term, isLeader)
+		// fmt.Printf("now rf.me %v logs: %+v\n", rf.me, rf.logs)
 	}
 
 	return index, term, isLeader
@@ -530,7 +533,7 @@ func (rf *Raft) sendEntries(command interface{}, term int, server int32, index i
 					args.Info = "firstLogAdd"
 				}
 
-				fmt.Println(args.LastLogIdx, "call 添加========")
+				// fmt.Println(args.LastLogIdx, "call 添加========")
 				rf.peers[i].Call("Raft.AppendEntries", &args, &reply)
 
 				if atomic.LoadInt32(&reply.Ok) == 1 {
@@ -551,7 +554,7 @@ func (rf *Raft) sendEntries(command interface{}, term int, server int32, index i
 					rf.mu.Unlock()
 					return
 				} else {
-					fmt.Println("loop break")
+					// fmt.Println("loop break")
 					return
 				}
 			}
@@ -580,9 +583,14 @@ func (rf *Raft) sendEntries(command interface{}, term int, server int32, index i
 
 		for _, i := range commitList {
 			k := 0
-			fmt.Printf("command %v提交给：%v: %v\n", command, i, commitApplyChMap[i])
-			if len(commitApplyChMap[i]) != 0 {
-				go rf.peers[i].Call("Raft.SendApplyCh", commitApplyChMap[i], &k)
+			// fmt.Printf("command %v提交给：%v: %v\n", command, i, commitApplyChMap[i])
+			rf.mu.Lock()
+			commitIdx := int(rf.commitIdx)
+			rf.mu.Unlock()
+			if len(commitApplyChMap[i]) != 0 && commitApplyChMap[i][len(commitApplyChMap[i])-1] > commitIdx {
+				go rf.peers[i].Call("Raft.Commit", commitApplyChMap[i], &k)
+
+				// fmt.Println("222222222222222222222222222222")
 			}
 
 		}
@@ -742,7 +750,7 @@ func (rf *Raft) ticker() {
 				rf.mu.Unlock()
 			}
 
-			fmt.Printf("%d voteCount: %v\n", rf.me, voteCount)
+			// fmt.Printf("%d voteCount: %v\n", rf.me, voteCount)
 			if int(atomic.LoadInt32(&voteCount)) > peerCount/2 {
 				fmt.Println("leader: ", rf.me)
 
@@ -779,7 +787,7 @@ func (rf *Raft) ticker() {
 				}
 
 			} else {
-				fmt.Println(rf.me, " 本轮选举失败")
+				// fmt.Println(rf.me, " 本轮选举失败")
 				// 自己失败了，别的仍可能成功，所以要等待超时
 				// 没有选举成功，成为follower，继续等待超时
 				rf.mu.Lock()
@@ -816,6 +824,8 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.recvHeartBeat = 0
 	rf.curCommandId = 1
 	rf.applyCh = applyCh
+	rf.commitIdx = 0
+	rf.lastApplyed = 0
 
 	// Your initialization code here (2A, 2B, 2C).
 
@@ -824,6 +834,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	// start ticker goroutine to start elections
 	go rf.ticker()
+	go rf.sendApplyCh()
 
 	return rf
 }

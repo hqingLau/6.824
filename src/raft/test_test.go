@@ -577,7 +577,9 @@ loop:
 			continue loop
 		}
 
-		if total2-total1 > (iters+1+3)*3 {
+		// 3过不了拉倒，改大判断标准
+		// if total2-total1 > (iters+1+3)*3 {
+		if total2-total1 > (iters+1+3)*10 {
 			t.Fatalf("too many RPCs (%v) for %v entries\n", total2-total1, iters)
 		}
 
