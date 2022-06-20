@@ -132,7 +132,7 @@ func (rf *Raft) Commit(commitIdx *int, reply *int32) {
 		rf.mu.Unlock()
 
 	}
-	rf.persist()
+	// rf.persist()
 	atomic.StoreInt32(reply, 1)
 }
 
@@ -272,7 +272,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	reply.Ok = 0
 	rf.mu.Lock()
 	// fmt.Printf("原来%d votefor %d\n", rf.me, rf.voteFor)
-	defer rf.persist()
+	//defer  rf.persist()
 	defer rf.mu.Unlock()
 
 	// fmt.Printf("me: %d, argsTerm:%d  rf: %+v\n", args.Me, args.CurrentTerm, rf)
@@ -333,7 +333,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	// 所以收到之后，就是收到了心跳或者log，重置election timeout
 	atomic.StoreInt32(&reply.Ok, 0)
 	rf.mu.Lock()
-	defer rf.persist()
+	//defer rf.persist()
 	defer rf.mu.Unlock()
 
 	if args.Entries[0].Command == nil {
@@ -464,7 +464,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		rf.logs = append(rf.logs, LogEntry{Command: command, Term: int64(term), Committed: 0})
 
 		rf.mu.Unlock()
-		rf.persist()
+		// rf.persist()
 	}
 
 	return index, term, isLeader
@@ -768,7 +768,7 @@ func (rf *Raft) ticker() {
 				args.Entries = append(args.Entries, LogEntry{nil, rf.currentTerm, 0})
 
 				rf.mu.Unlock()
-				rf.persist()
+				// rf.persist()
 				for idx, _ := range rf.peers {
 					i := idx
 					go func() {
@@ -800,7 +800,7 @@ func (rf *Raft) ticker() {
 				rf.voteFor = -1
 
 				rf.mu.Unlock()
-				rf.persist()
+				// rf.persist()
 			}
 		}
 
@@ -839,7 +839,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	// Your initialization code here (2A, 2B, 2C).
 
 	// initialize from state persisted before a crash
-	rf.readPersist(persister.ReadRaftState())
+	// rf.readPersist(persister.ReadRaftState())
 
 	// start ticker goroutine to start elections
 	go rf.ticker()
