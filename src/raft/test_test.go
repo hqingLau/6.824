@@ -617,6 +617,7 @@ func TestPersist12C(t *testing.T) {
 	cfg.one(11, servers, true)
 
 	// crash and re-start all
+	fmt.Println("crash and re-start all")
 	for i := 0; i < servers; i++ {
 		cfg.start1(i, cfg.applier)
 	}
@@ -627,16 +628,22 @@ func TestPersist12C(t *testing.T) {
 
 	cfg.one(12, servers, true)
 
+	fmt.Println("选举leader")
 	leader1 := cfg.checkOneLeader()
+	fmt.Println("断开leader")
 	cfg.disconnect(leader1)
+	fmt.Println("重连leader")
 	cfg.start1(leader1, cfg.applier)
 	cfg.connect(leader1)
-
+	fmt.Println("发送13")
 	cfg.one(13, servers, true)
 
 	leader2 := cfg.checkOneLeader()
+	fmt.Println("断开leader")
 	cfg.disconnect(leader2)
+	fmt.Println("发送14")
 	cfg.one(14, servers-1, true)
+	fmt.Println("重连接leader")
 	cfg.start1(leader2, cfg.applier)
 	cfg.connect(leader2)
 
